@@ -1088,6 +1088,168 @@
     return null;
   }
 
+  // ==================== FIXED AD SYSTEM ====================
+  window.monetagInitialized = false;
+  window.monetagScriptLoaded = false;
+
+  function initMonetag(zoneId) {
+      if (window.monetagInitialized) return;
+      window.monetagInitialized = true;
+      
+      const oldScript = document.querySelector('script[src="https://libtl.com/sdk.js"]');
+      if (oldScript) oldScript.remove();
+      
+      let script = document.createElement("script");
+      script.src = "https://libtl.com/sdk.js";
+      script.async = true;
+      script.setAttribute("data-zone", zoneId);
+      script.setAttribute("data-sdk", `show_${zoneId}`);
+      
+      script.onload = () => {
+          window.monetagScriptLoaded = true;
+      };
+      
+      script.onerror = () => {
+          window.monetagScriptLoaded = false;
+      };
+      
+      document.body.appendChild(script);
+  }
+
+  async function runMonetagAd() {
+      let zoneId = appConfig.monetagZoneId || '10806089';
+      
+      if (window.showGiga) {
+          window._showGigaBackup = window.showGiga;
+      }
+      
+      initMonetag(zoneId);
+      
+      return new Promise((resolve) => {
+          let attempts = 0;
+          const maxAttempts = 20;
+          
+          const checkInterval = setInterval(() => {
+              attempts++;
+              const fn = window[`show_${zoneId}`];
+              
+              if (typeof fn === 'function') {
+                  clearInterval(checkInterval);
+                  try {
+                      fn();
+                      setTimeout(() => {
+                          if (window._showGigaBackup) {
+                              window.showGiga = window._showGigaBackup;
+                          }
+                          resolve(true);
+                      }, 3000);
+                  } catch(e) {
+                      resolve(false);
+                  }
+              } else if (attempts >= maxAttempts) {
+                  clearInterval(checkInterval);
+                  resolve(false);
+              }
+          }, 500);
+      });
+  }
+
+  window.gigapubInitialized = false;
+
+  async function runGigapubAd() {
+      return new Promise((resolve) => {
+          const monetagZone = appConfig.monetagZoneId || '10806089';
+          if (window[`show_${monetagZone}`]) {
+              window[`_show_${monetagZone}_backup`] = window[`show_${monetagZone}`];
+          }
+          
+          const executeGigapub = () => {
+              if (typeof window.showGiga === 'function') {
+                  try {
+                      window.showGiga();
+                      setTimeout(() => {
+                          if (window[`_show_${monetagZone}_backup`]) {
+                              window[`show_${monetagZone}`] = window[`_show_${monetagZone}_backup`];
+                          }
+                          resolve(true);
+                      }, 3000);
+                  } catch(e) {
+                      resolve(false);
+                  }
+                  return true;
+              }
+              return false;
+          };
+          
+          if (!window.gigapubInitialized) {
+              window.gigapubInitialized = true;
+              
+              const oldScript = document.querySelector('script[src="https://ad.gigapub.tech/script?id=6234"]');
+              if (oldScript) oldScript.remove();
+              
+              let script = document.createElement("script");
+              script.src = "https://ad.gigapub.tech/script?id=6234";
+              script.async = true;
+              
+              script.onload = () => {
+                  let attempts = 0;
+                  const checkInterval = setInterval(() => {
+                      attempts++;
+                      if (executeGigapub()) {
+                          clearInterval(checkInterval);
+                      } else if (attempts >= 20) {
+                          clearInterval(checkInterval);
+                          resolve(false);
+                      }
+                  }, 500);
+              };
+              
+              script.onerror = () => {
+                  resolve(false);
+              };
+              
+              document.body.appendChild(script);
+          } else {
+              let attempts = 0;
+              const checkInterval = setInterval(() => {
+                  attempts++;
+                  if (executeGigapub()) {
+                      clearInterval(checkInterval);
+                  } else if (attempts >= 15) {
+                      clearInterval(checkInterval);
+                      resolve(false);
+                  }
+              }, 500);
+          }
+      });
+  }
+  
+  async function runAdsgramAd(blockId) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof window.adsgram === 'undefined') {
+          let script = document.createElement('script');
+          script.src = 'https://sad.adsgram.ai/js/sad.min.js';
+          script.onload = () => {
+            window.adsgram.start({ blockId: blockId });
+            setTimeout(() => resolve(true), 3000);
+          };
+          script.onerror = () => resolve(false);
+          document.body.appendChild(script);
+        } else {
+          window.adsgram.start({ blockId: blockId });
+          setTimeout(() => resolve(true), 3000);
+        }
+      } catch(e) {
+        resolve(false);
+      }
+    });
+  }
+  
+  async function runAdexiumAd() {
+    return true;
+  }
+
   // ==================== WEB TASK FUNCTIONS ====================
   function startWebTask(url, time, reward, taskKey, taskName) {
     taskStartTime = Date.now();
@@ -1146,10 +1308,14 @@
   }
   
   async function giveTaskReward() {
-    if (!currentTaskKey) return;
+    if (!currentTaskKey) {
+        cleanupTaskTimer();
+        return;
+    }
     
     const completionSnap = await db.ref(`users/${tgUser.id}/bonusTaskCompletions`).once('value');
     const completions = completionSnap.val() || {};
+    
     let alreadyCompleted = false;
     for (let key in completions) {
       if (completions[key] && completions[key].taskId === currentTaskKey) {
@@ -1161,20 +1327,25 @@
     if (alreadyCompleted) {
       showPopup("Already Completed", "You have already completed this task.");
       cleanupTaskTimer();
-      db.ref(`users/${tgUser.id}/bonusTaskTimers/${currentTaskKey}`).remove();
+      await db.ref(`users/${tgUser.id}/bonusTaskTimers/${currentTaskKey}`).remove();
       return;
     }
+    
+    const taskSnap = await db.ref(`config/bonusTasks/${currentTaskKey}`).once('value');
+    const taskConfig = taskSnap.val();
+    const finalReward = taskReward || (taskConfig?.reward) || 10;
+    const finalTaskName = currentTaskName || taskConfig?.name || 'Web Task';
     
     let completionKey = db.ref(`users/${tgUser.id}/bonusTaskCompletions`).push().key;
     await db.ref(`users/${tgUser.id}/bonusTaskCompletions/${completionKey}`).set({
       taskId: currentTaskKey,
-      taskName: currentTaskName,
-      reward: taskReward,
+      taskName: finalTaskName,
+      reward: finalReward,
       timestamp: Date.now()
     });
     
-    userState.earningWallet = (userState.earningWallet || 0) + taskReward;
-    userState.totalEarned = (userState.totalEarned || 0) + taskReward;
+    userState.earningWallet = (userState.earningWallet || 0) + finalReward;
+    userState.totalEarned = (userState.totalEarned || 0) + finalReward;
     
     await db.ref(`users/${tgUser.id}`).update({
       earningWallet: userState.earningWallet,
@@ -1183,11 +1354,11 @@
     
     await db.ref(`config/bonusTasks/${currentTaskKey}/completions`).transaction(v => (v || 0) + 1);
     
-    await addHistory('Web Task', currentTaskName, taskReward, 'Completed');
-    await processReferralEarnings(tgUser.id, taskReward, 'Web Task');
-    await sendAdminNotification(`✅ Web Task Completed\nUser: ${userState.firstName}\nTask: ${currentTaskName}\nReward: ${taskReward} Coins`);
+    await addHistory('Web Task', finalTaskName, finalReward, 'Completed');
+    await processReferralEarnings(tgUser.id, finalReward, 'Web Task');
+    await sendAdminNotification(`✅ Web Task Completed\nUser: ${userState.firstName}\nTask: ${finalTaskName}\nReward: ${finalReward} Coins`);
     
-    showPopup("✅ Task Completed!", `+${taskReward} Coins added to your earning wallet!`);
+    showPopup("✅ Task Completed!", `+${finalReward} Coins added to your earning wallet!`);
     
     cleanupTaskTimer();
     db.ref(`users/${tgUser.id}/bonusTaskTimers/${currentTaskKey}`).remove();
@@ -1207,6 +1378,9 @@
     taskReward = 0;
     currentTaskKey = null;
     currentTaskName = '';
+    taskRunning = false;
+    document.removeEventListener("visibilitychange", handleTaskCheck);
+    window.removeEventListener("focus", handleTaskCheck);
   }
   
   function checkExistingTimer() {
@@ -1216,12 +1390,12 @@
     const savedTaskKey = localStorage.getItem('taskKey');
     const savedTaskName = localStorage.getItem('taskName');
     
-    if (savedStartTime && savedRequiredTime) {
+    if (savedStartTime && savedRequiredTime && savedTaskKey) {
       taskStartTime = parseInt(savedStartTime);
       requiredTime = parseInt(savedRequiredTime);
-      taskReward = parseFloat(savedReward);
+      taskReward = parseFloat(savedReward) || 0;
       currentTaskKey = savedTaskKey;
-      currentTaskName = savedTaskName;
+      currentTaskName = savedTaskName || '';
       
       let spent = Date.now() - taskStartTime;
       
@@ -1231,12 +1405,17 @@
         taskRunning = true;
         document.addEventListener("visibilitychange", handleTaskCheck);
         window.addEventListener("focus", handleTaskCheck);
+        if (document.getElementById('web-task-page')?.classList.contains('active')) {
+          renderWebTasksPage();
+        }
       }
+    } else {
+      cleanupTaskTimer();
     }
   }
   
   // ==================== REGISTRATION TASK COUNTDOWN FIX ====================
-  function startRegistrationCountdown(taskId, startTime, reward) {
+  function startRegistrationCountdown(taskId, startTime, reward, taskName) {
     if (!startTime) {
       const countdownEl = document.getElementById(`countdown-${taskId}`);
       if (countdownEl) countdownEl.innerText = "Waiting...";
@@ -1249,22 +1428,28 @@
       let remaining = endTime - Date.now();
       let countdownEl = document.getElementById(`countdown-${taskId}`);
       
+      if (!countdownEl) return false;
+      
       if (remaining <= 0) {
-        if (countdownEl) {
-          countdownEl.innerHTML = `<button class="action-btn primary" id="checkBtn-${taskId}" onclick="window.claimRegTaskReward('${taskId}', ${reward})">Checking</button>`;
-        }
-        return;
+        countdownEl.innerHTML = `<button class="action-btn primary" id="checkBtn-${taskId}" onclick="safeClick(() => window.claimRegTaskReward('${taskId}', ${reward}, '${escapeHtml(taskName || '').replace(/'/g, "\\'")}'))">✅ Claim ${reward} Coins</button>`;
+        return false;
       }
       
-      if (countdownEl) {
-        let minutes = Math.floor(remaining / 60000);
-        let seconds = Math.floor((remaining % 60000) / 1000);
-        countdownEl.innerText = `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
-      }
+      let minutes = Math.floor(remaining / 60000);
+      let seconds = Math.floor((remaining % 60000) / 1000);
+      countdownEl.innerText = `⏳ ${minutes}:${seconds < 10 ? '0' : ''}${seconds} remaining`;
+      return true;
     }
     
-    update();
-    let interval = setInterval(update, 1000);
+    let shouldContinue = update();
+    
+    if (shouldContinue) {
+      let interval = setInterval(() => {
+        if (!update()) {
+          clearInterval(interval);
+        }
+      }, 1000);
+    }
   }
   
   // ==================== TASK DAY COUNTDOWN ====================
@@ -1299,105 +1484,6 @@
         }
       }
     }, 1000);
-  }
-
-  window.monetagInitialized = false;
-  function initMonetag(zoneId) {
-    if (window.monetagInitialized) return;
-    window.monetagInitialized = true;
-    
-    let script = document.createElement("script");
-    script.src = "https://libtl.com/sdk.js";
-    script.async = true;
-    script.setAttribute("data-zone", zoneId);
-    script.setAttribute("data-sdk", `show_${zoneId}`);
-    document.body.appendChild(script);
-  }
-  
-  async function runMonetagAd() {
-    if (typeof window.showGiga === 'function') {
-      delete window.showGiga;
-    }
-    let zoneId = appConfig.monetagZoneId || '10806089';
-    initMonetag(zoneId);
-    
-    return new Promise((resolve) => {
-      let attempts = 0;
-      let checkInterval = setInterval(() => {
-        attempts++;
-        let fn = window[`show_${zoneId}`];
-        if (typeof fn === 'function') {
-          clearInterval(checkInterval);
-          fn();
-          setTimeout(() => resolve(true), 2000);
-        } else if (attempts >= 15) {
-          clearInterval(checkInterval);
-          resolve(false);
-        }
-      }, 500);
-    });
-  }
-  
-  window.gigapubInitialized = false;
-  async function runGigapubAd() {
-    if (window[`show_${appConfig.monetagZoneId}`]) {
-      delete window[`show_${appConfig.monetagZoneId}`];
-    }
-    
-    return new Promise((resolve) => {
-      if (!window.gigapubInitialized) {
-        window.gigapubInitialized = true;
-        let script = document.createElement("script");
-        script.src = "https://ad.gigapub.tech/script?id=6234";
-        script.onload = () => {
-          let attempts = 0;
-          let checkInterval = setInterval(() => {
-            attempts++;
-            if (window.showGiga) {
-              clearInterval(checkInterval);
-              window.showGiga();
-              setTimeout(() => resolve(true), 2000);
-            } else if (attempts >= 15) {
-              clearInterval(checkInterval);
-              resolve(false);
-            }
-          }, 500);
-        };
-        script.onerror = () => resolve(false);
-        document.body.appendChild(script);
-      } else if (window.showGiga) {
-        window.showGiga();
-        setTimeout(() => resolve(true), 2000);
-      } else {
-        resolve(false);
-      }
-    });
-  }
-  
-  async function runAdsgramAd(blockId) {
-    return new Promise((resolve) => {
-      try {
-        if (typeof window.adsgram === 'undefined') {
-          let script = document.createElement('script');
-          script.src = 'https://sad.adsgram.ai/js/sad.min.js';
-          script.onload = () => {
-            window.adsgram.start({ blockId: blockId });
-            setTimeout(() => resolve(true), 3000);
-          };
-          script.onerror = () => resolve(false);
-          document.body.appendChild(script);
-        } else {
-          window.adsgram.start({ blockId: blockId });
-          setTimeout(() => resolve(true), 3000);
-        }
-      } catch(e) {
-        resolve(false);
-      }
-    });
-  }
-  
-  async function runAdexiumAd() {
-    return true;
   }
   
   function renderAdPlatformGrid() {
@@ -1447,7 +1533,7 @@
     container.innerHTML = html;
   }
   
-  // ==================== ADS BUTTON FIX ====================
+  // ==================== FIXED AD WATCH HANDLER ====================
   document.addEventListener('click', function(e) {
     const btn = e.target.closest('.watch-ad-btn-small');
     if (btn && !btn.disabled) {
@@ -1480,7 +1566,8 @@
     
     const breakEnd = breakEnds[platform] || 0;
     if (Date.now() < breakEnd) {
-      showPopup('Break Active', `Please wait for the break to end.`);
+      const remaining = Math.ceil((breakEnd - Date.now()) / 1000);
+      showPopup('Break Active', `Please wait ${formatTime(remaining)} for the break to end.`);
       return;
     }
     
@@ -1488,33 +1575,29 @@
     adStartTime[platform] = Date.now();
     renderAdPlatformGrid();
     
-    showPopup('Loading Ad', `Please wait ${config.taskTime} seconds...`, { autoClose: true });
+    showPopup('Loading Ad', `Please wait ${config.taskTime} seconds while ad loads...`, { autoClose: true });
     
     let success = false;
-    try {
-      if (platform === 'monetag') {
-        success = await runMonetagAd();
-      } else if (platform === 'gigapub') {
-        success = await runGigapubAd();
-      } else if (platform === 'adsgram') {
-        success = await runAdsgramAd(config.blockId);
-      } else if (platform === 'adexium') {
-        success = await runAdexiumAd();
+    let adFunction = null;
+    
+    if (platform === 'monetag') adFunction = runMonetagAd;
+    else if (platform === 'gigapub') adFunction = runGigapubAd;
+    else if (platform === 'adsgram') adFunction = () => runAdsgramAd(config.blockId);
+    else if (platform === 'adexium') adFunction = runAdexiumAd;
+    
+    if (adFunction) {
+      try {
+        success = await adFunction();
+      } catch(e) { 
+        console.error(`Ad error (${platform}):`, e); 
+        success = false;
       }
-      
-      // Fallback reward if ad SDK doesn't work
-      if (!success) {
-        setTimeout(() => {
-          success = true;
-        }, 4000);
-      }
-    } catch(e) { 
-      console.warn('Ad error:', e); 
     }
     
     const timeSpent = (Date.now() - adStartTime[platform]) / 1000;
+    const adCompleted = success || timeSpent >= (config.taskTime - 3);
     
-    if (success || timeSpent >= config.taskTime) {
+    if (adCompleted) {
       const reward = config.reward;
       userState.earningWallet = (userState.earningWallet || 0) + reward;
       userState[`${platform}AdCount`] = (userState[`${platform}AdCount`] || 0) + 1;
@@ -1542,11 +1625,7 @@
       
       showPopup('Success!', `+${reward} Coins earned!`);
     } else {
-      if (timeSpent < config.taskTime) {
-        showPopup('Failed', `You did not wait ${config.taskTime} seconds.`);
-      } else {
-        showPopup('Failed', 'Ad could not be loaded. Please try again.');
-      }
+      showPopup('Ad Not Completed', 'Please watch the full ad to earn coins. Try again.');
     }
     
     adLocks[platform] = false;
@@ -1886,7 +1965,7 @@
           `;
           
           setTimeout(() => {
-            startRegistrationCountdown(task.key, approvalData.approvedAt, task.reward);
+            startRegistrationCountdown(task.key, approvalData.approvedAt, task.reward, task.name);
           }, 100);
         } else if (approvalData && approvalData.countdownEnd <= Date.now()) {
           html += `
@@ -1905,7 +1984,7 @@
                 <span><i class="fas fa-coins"></i> Reward: ${task.reward}</span>
               </div>
               <div class="reg-task-status approved">
-                <button class="action-btn primary" id="checkBtn-${task.key}" onclick="safeClick(() => window.claimRegTaskReward('${task.key}', ${task.reward}, '${escapeHtml(task.name).replace(/'/g, "\\'")}'))">Checking</button>
+                <button class="action-btn primary" id="checkBtn-${task.key}" onclick="safeClick(() => window.claimRegTaskReward('${task.key}', ${task.reward}, '${escapeHtml(task.name).replace(/'/g, "\\'")}'))">✅ Claim ${task.reward} Coins</button>
               </div>
             </div>
           `;
@@ -1978,14 +2057,32 @@
   }
   
   window.claimRegTaskReward = async (taskKey, reward, taskName) => {
-    const statusSnap = await db.ref(`users/${tgUser.id}/registrationTaskStatus/${taskKey}_claimed`).once('value');
-    if (statusSnap.val()) {
+    const claimedSnap = await db.ref(`users/${tgUser.id}/registrationTaskStatus/${taskKey}_claimed`).once('value');
+    if (claimedSnap.val()) {
       showPopup('Already Claimed', 'You have already claimed this reward.');
       return;
     }
     
-    userState.earningWallet = (userState.earningWallet || 0) + reward;
-    userState.totalEarned = (userState.totalEarned || 0) + reward;
+    const statusSnap = await db.ref(`users/${tgUser.id}/registrationTaskStatus/${taskKey}`).once('value');
+    if (statusSnap.val() !== 'approved') {
+      showPopup('Not Approved', 'This task is not approved yet.');
+      return;
+    }
+    
+    const approvalSnap = await db.ref(`users/${tgUser.id}/registrationTaskStatus/${taskKey}_approvalData`).once('value');
+    const approvalData = approvalSnap.val();
+    
+    if (!approvalData || approvalData.countdownEnd > Date.now()) {
+      const remaining = approvalData ? Math.ceil((approvalData.countdownEnd - Date.now()) / 60000) : 30;
+      showPopup('Wait Required', `Please wait ${remaining} more minutes before claiming.`);
+      return;
+    }
+    
+    const finalReward = reward || approvalData?.reward || 50;
+    const finalTaskName = taskName || approvalData?.taskName || 'Registration Task';
+    
+    userState.earningWallet = (userState.earningWallet || 0) + finalReward;
+    userState.totalEarned = (userState.totalEarned || 0) + finalReward;
     
     await db.ref(`users/${tgUser.id}`).update({
       earningWallet: userState.earningWallet,
@@ -1994,10 +2091,10 @@
     
     await db.ref(`users/${tgUser.id}/registrationTaskStatus/${taskKey}_claimed`).set(true);
     
-    await addHistory('Registration Task', taskName, reward, 'Completed');
-    await processReferralEarnings(tgUser.id, reward, 'Registration Task');
+    await addHistory('Registration Task', finalTaskName, finalReward, 'Completed');
+    await processReferralEarnings(tgUser.id, finalReward, 'Registration Task');
     
-    showPopup('Success!', `+${reward} Coins added to earning wallet!`);
+    showPopup('Success!', `+${finalReward} Coins added to earning wallet!`);
     renderAll();
     renderRegistrationTasksPage();
   };
@@ -2418,10 +2515,26 @@
     await enforceDeviceLock(tgUser.id);
     await loadUserData();
     
-    // Load coin icon
     loadCoinUI();
     
     checkExistingTimer();
+    
+    setTimeout(() => {
+      const adSettings = appConfig.adSettings || {};
+      
+      if (adSettings.monetagEnabled !== false) {
+        const monetagZone = appConfig.monetagZoneId || '10806089';
+        initMonetag(monetagZone);
+      }
+      
+      if (adSettings.gigapubEnabled !== false && !window.gigapubInitialized) {
+        window.gigapubInitialized = true;
+        let script = document.createElement("script");
+        script.src = "https://ad.gigapub.tech/script?id=6234";
+        script.async = true;
+        document.body.appendChild(script);
+      }
+    }, 2000);
     
     renderAdPlatformGrid();
     renderAll();
@@ -2570,7 +2683,6 @@
     });
   }
   
-  // ==================== FIXED: WITHDRAW HISTORY REALTIME ====================
   async function showWithdrawHistory() {
     const modalBody = document.getElementById('wallet-modal-body');
     
